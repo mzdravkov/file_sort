@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 )
 
 var sorterPool = make(chan chan []byte, 8)
@@ -49,7 +50,25 @@ func nextSort(lines [][]byte, signalFinishChan chan struct{}) {
 	signalFinishChan <- struct{}{}
 }
 
-func bucketSort(buff []byte) [][]byte {
+// This function assumes that the buckets of lines are generated from the data in dest,
+// hence the size of dest should be exactly the same as the size of all the data in the buckets
+func flattenBucketsOfLines(dest []byte, buckets [][][]byte) {
+	var totalLen int
+	for _, bucket := range buckets {
+		for _, line := range bucket {
+			totalLen += len(line)
+		}
+	}
+
+	var destPos int
+	for _, bucket := range buckets {
+		for _, line := range bucket {
+			destPos += copy(dest[destPos:], line)
+		}
+	}
+}
+
+func bucketSort(buff []byte) {
 	buckets := make([][][]byte, 256)
 
 	reader := bufio.NewReader(bytes.NewBuffer(buff))
@@ -78,79 +97,14 @@ func bucketSort(buff []byte) [][]byte {
 		<-signalFinishChan
 	}
 
-	result := buckets[0]
-	for _, bucket := range buckets[1:] {
-		result = append(result, bucket...)
-	}
-
-	fmt.Println(result[:3])
-
-	return result
+	// overwrite the sorted data back to the source buffer
+	flattenBucketsOfLines(buff, buckets)
 }
 
 func sort(buff []byte) {
 	fmt.Printf("Starting to sort %d bytes of data.\n", len(buff))
 	bucketSort(buff)
-	// trie := CreateTrie(buff)
-	// fmt.Println(trie)
 }
-
-// type TrieNode struct {
-// 	// val      []byte
-// 	val      byte
-// 	isLeaf   bool
-// 	children map[byte]*TrieNode
-// }
-
-// type Trie struct {
-// 	root *TrieNode
-// }
-
-// func CreateTrie(buff []byte) *Trie {
-// 	fmt.Println("CREATE TRIE")
-// 	t := new(Trie)
-// 	t.root = new(TrieNode)
-// 	t.root.isLeaf = false
-// 	t.root.children = make(map[byte]*TrieNode)
-
-// 	reader := bufio.NewReader(bytes.NewBuffer(buff))
-
-// 	newLine := []byte("\n")[0]
-// 	for {
-// 		line, err := reader.ReadBytes(newLine)
-// 		// TODO: is it sure that I should break here or should I loop once more?
-// 		if err != nil {
-// 			if err == io.EOF {
-// 				fmt.Println("BREAAK")
-// 				break
-// 			}
-// 			panic(err)
-// 		}
-
-// 		word := line[:len(line)-1]
-
-// 		currentNode := t.root
-// 		for i := 0; i < len(word)-1; i++ {
-
-// 			if _, ok := currentNode.children[word[i]]; !ok {
-// 				newChild := new(TrieNode)
-// 				// TODO: do I need the val of non-leaf trie nodes?
-// 				// newChild.val = []byte{word[i]}
-// 				newChild.val = word[i]
-// 				newChild.isLeaf = false
-// 				newChild.children = make(map[byte]*TrieNode)
-// 				currentNode.children[word[i]] = newChild
-// 			}
-// 			currentNode = currentNode.children[word[i]]
-// 		}
-// 		leafNode := new(TrieNode)
-// 		// leafNode.val = word
-// 		leafNode.val = word[len(word)-1]
-// 		leafNode.isLeaf = true
-// 	}
-
-// 	return t
-// }
 
 func partitioningReader(filename string) {
 	file, err := os.Open(filename)
@@ -213,6 +167,19 @@ func writer(sortedBuffs <-chan []byte) {
 			readerFinishedFlag = true
 		case buff := <-sortedBuffs:
 			fmt.Printf("Writting a sorted buff with size %d to file.\n", len(buff))
+
+			file, err := os.Create("partition_" + strconv.Itoa(partitionsWritten) + ".txt")
+			if err != nil {
+				panic(err)
+			}
+			defer file.Close()
+			writer := bufio.NewWriter(file)
+
+			_, err = writer.Write(buff)
+			if err != nil {
+				panic(err)
+			}
+
 			partitionsWritten += 1
 		}
 		if readerFinishedFlag && partitionsRead == partitionsWritten {
