@@ -12,7 +12,7 @@ import (
 	"strconv"
 )
 
-var sorterPool = make(chan chan []byte, 8)
+var sorterPool chan chan []byte
 var writerInput = make(chan []byte)
 var readerFinished = make(chan int)
 var writerFinished = make(chan struct{})
@@ -53,6 +53,7 @@ func (a ByteSliceSort) Len() int           { return len(a) }
 func (a ByteSliceSort) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
 func (a ByteSliceSort) Less(i, j int) bool { return bytes.Compare(a[i][1:], a[j][1:]) == -1 }
 
+// TODO: Currently I'm sorting by bytes.Compare. However, as bytes V < c, which is probably not what we desire
 func nextSort(lines [][]byte, signalFinishChan chan struct{}) {
 	// insertionSort(lines)
 	sort.Sort(ByteSliceSort(lines))
@@ -63,13 +64,6 @@ func nextSort(lines [][]byte, signalFinishChan chan struct{}) {
 // This function assumes that the buckets of lines are generated from the data in dest,
 // hence the size of dest should be exactly the same as the size of all the data in the buckets
 func flattenBucketsOfLines(dest []byte, buckets [][][]byte) {
-	var totalLen int
-	for _, bucket := range buckets {
-		for _, line := range bucket {
-			totalLen += len(line)
-		}
-	}
-
 	var destPos int
 	for _, bucket := range buckets {
 		for _, line := range bucket {
@@ -192,7 +186,80 @@ func writer(sortedBuffs <-chan []byte) {
 			partitionsWritten += 1
 		}
 		if readerFinishedFlag && partitionsRead == partitionsWritten {
+			kWayMerge(partitionsWritten)
 			writerFinished <- struct{}{}
+			return
+		}
+	}
+}
+
+// TODO: think about maybe doing one initial to merge groups of N files which may increase the overall performance
+func kWayMerge(partitionFiles int) {
+	file, err := os.Create("output.txt")
+	if err != nil {
+		panic(err)
+	}
+	defer file.Close()
+	writer := bufio.NewWriter(file)
+
+	inputReaders := make([]*bufio.Reader, partitionFiles)
+
+	for i := 0; i < partitionFiles; i++ {
+		filename := "partition_" + strconv.Itoa(i) + ".txt"
+		file, err := os.Open(filename)
+		if err != nil {
+			panic(err)
+		}
+		defer file.Close()
+
+		inputReaders[i] = bufio.NewReader(file)
+	}
+
+	// initial step: read the first line for each of the inputReaders
+	inputReadersForDeletion := make([]int, 0)
+	currentLines := make([][]byte, 0, len(inputReaders))
+	for i, reader := range inputReaders {
+		if line, err := reader.ReadBytes(newLine); err == nil {
+			currentLines = append(currentLines, line)
+		} else {
+			if err == io.EOF {
+				// if all lines from this file have bean read, we mark it for deletion
+				inputReadersForDeletion = append(inputReadersForDeletion, i)
+			} else {
+				panic(err)
+			}
+		}
+	}
+	for _, i := range inputReadersForDeletion {
+		inputReaders = append(inputReaders[:i], inputReaders[i+1:]...)
+		// TODO: delete the file from the disk
+	}
+
+	// general case step: get the min line from all currentLines and then move forward only that reader
+	for len(inputReaders) > 0 {
+		minLine := 0
+		for i, line := range currentLines[1:] {
+			if bytes.Compare(currentLines[minLine], line) == 1 {
+				minLine = i
+			}
+		}
+
+		_, err = writer.Write(currentLines[minLine])
+		if err != nil {
+			panic(err)
+		}
+
+		if newLine, err := inputReaders[minLine].ReadBytes(newLine); err == nil {
+			currentLines[minLine] = newLine
+		} else {
+			if err == io.EOF {
+				// if all lines from this file have bean read, we delete it
+				inputReaders = append(inputReaders[:minLine], inputReaders[minLine+1:]...)
+				currentLines = append(currentLines[:minLine], currentLines[minLine+1:]...)
+				// TODO: delete the file from the disk
+			} else {
+				panic(err)
+			}
 		}
 	}
 }
@@ -231,9 +298,10 @@ func main() {
 	fmt.Println(*assignedMemory)
 	numOfSorters := maxProcs
 	fmt.Println("sorters: ", numOfSorters)
+	sorterPool = make(chan chan []byte, int(numOfSorters))
 	createSorters(int(numOfSorters))
 
-	bufferSize := 1024 * 1024 * (*assignedMemory / numOfSorters)
+	bufferSize := 1024 * 1024 * (*assignedMemory / numOfSorters) / 2
 	fmt.Println("Buffer size: ", bufferSize)
 
 	go writer(writerInput)
