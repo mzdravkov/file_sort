@@ -15,7 +15,8 @@ import (
 var sorterPool chan chan []byte
 var writerInput = make(chan []byte)
 var readerFinished = make(chan int)
-var writerFinished = make(chan struct{})
+var writerFinished = make(chan int)
+var killSorters = make(chan struct{})
 var newLine = []byte("\n")[0]
 
 func createSorters(n int) {
@@ -29,11 +30,15 @@ func createSorter() chan []byte {
 	fmt.Println("creating a sorter")
 	go func() {
 		for {
-			buff := <-ch
-			sortBuffer(buff)
-			writerInput <- buff
-			sorterPool <- ch
-			fmt.Println("sorter returning to pool")
+			select {
+			case buff := <-ch:
+				sortBuffer(buff)
+				writerInput <- buff
+				sorterPool <- ch
+				fmt.Println("sorter returning to pool")
+			case <-killSorters:
+				return
+			}
 		}
 	}()
 	return ch
@@ -63,6 +68,10 @@ func flattenBucketsOfLines(dest []byte, buckets [][][]byte) {
 	}
 }
 
+// TODO: maybe use sample sort, but it may be hard to do so though, because we don't have
+// all lines at the beginning when assigning them to buckets
+// TODO: maybe use my own append function, because go's append grows the underlying array twice
+// this may cause millions of unneccessarily allocated []byte elements
 func bucketSort(buff []byte) {
 	buckets := make([][][]byte, 256)
 
@@ -81,6 +90,13 @@ func bucketSort(buff []byte) {
 		// TODO: think about zero-length lines
 
 		bucketIndex := int(line[0])
+		// buckets[bucketIndex] = append(buckets[bucketIndex], line)
+
+		if len(buckets[bucketIndex])+1 > cap(buckets[bucketIndex]) {
+			tmp := make([][]byte, len(buckets[bucketIndex]), len(buckets[bucketIndex])+1+len(buckets[bucketIndex])/2)
+			copy(tmp, buckets[bucketIndex])
+			buckets[bucketIndex] = tmp
+		}
 		buckets[bucketIndex] = append(buckets[bucketIndex], line)
 	}
 
@@ -171,10 +187,6 @@ func writer(sortedBuffs <-chan []byte, bufferSize int) {
 			readerFinishedFlag = true
 		case buff := <-sortedBuffs:
 			fmt.Printf("Writting a sorted buff with size %d to file.\n", len(buff))
-			if len(buff) < 1024 {
-				fmt.Println("Midget: ", partitionsWritten)
-				fmt.Println(string(buff))
-			}
 
 			file, err := os.Create("partition_" + strconv.Itoa(partitionsWritten) + ".txt")
 			if err != nil {
@@ -183,25 +195,24 @@ func writer(sortedBuffs <-chan []byte, bufferSize int) {
 			defer file.Close()
 			writer := bufio.NewWriter(file)
 
-			bytesWritten, err := writer.Write(buff)
+			_, err = writer.Write(buff)
 			if err != nil {
 				panic(err)
 			}
 			writer.Flush()
-			fmt.Println("Writer wrote ", bytesWritten, " to partition ", partitionsWritten)
 
 			partitionsWritten += 1
 		}
 		if readerFinishedFlag && partitionsRead == partitionsWritten {
 			fmt.Println(partitionsWritten)
-			kWayMerge(partitionsWritten, bufferSize)
-			writerFinished <- struct{}{}
+			writerFinished <- partitionsWritten
 			return
 		}
 	}
 }
 
 // TODO: think about maybe doing one initial to merge groups of N files which may increase the overall performance
+// TODO: use buffering when reading the partition files
 func kWayMerge(partitionFilesCount int, bufferSize int) {
 	fmt.Println("Starting a k-way merge")
 	file, err := os.Create("output.txt")
@@ -223,7 +234,6 @@ func kWayMerge(partitionFilesCount int, bufferSize int) {
 	// open all partition files and create readers
 	for i := 0; i < partitionFilesCount; i++ {
 		filename := "partition_" + strconv.Itoa(i) + ".txt"
-		fmt.Println(filename)
 		partitionFiles[i] = filename
 		file, err := os.Open(filename)
 		if err != nil {
@@ -240,15 +250,13 @@ func kWayMerge(partitionFilesCount int, bufferSize int) {
 		inputReaders = append(inputReaders[:i], inputReaders[i+1:]...)
 		currentLines = append(currentLines[:i], currentLines[i+1:]...)
 		fmt.Println("deleting " + partitionFiles[i])
-		// os.Remove(partitionFiles[i])
+		os.Remove(partitionFiles[i])
 		partitionFiles = append(partitionFiles[:i], partitionFiles[i+1:]...)
-		fmt.Println(partitionFiles)
 	}
 
 	// initial step: read the first line for each of the inputReaders
 	partitionsForDeletion := make([]int, 0)
 	for i, reader := range inputReaders {
-		fmt.Println(i)
 		if line, err := reader.ReadBytes(newLine); err == nil {
 			currentLines[i] = line
 		} else {
@@ -272,9 +280,10 @@ func kWayMerge(partitionFilesCount int, bufferSize int) {
 
 	// general case step: get the min line from all currentLines and then move forward only that reader
 	for len(currentLines) > 0 {
+		// get the minimum line
 		minLine := 0
-		for i, line := range currentLines[1:] {
-			if bytes.Compare(currentLines[minLine], line) == 1 {
+		for i := 1; i < len(currentLines); i++ {
+			if bytes.Compare(currentLines[minLine], currentLines[i]) == 1 {
 				minLine = i
 			}
 		}
@@ -354,7 +363,15 @@ func main() {
 
 	go writer(writerInput, bufferSize)
 	partitioningReader(inputFile, bufferSize)
-	<-writerFinished
+
+	// wait for the writer to finish
+	partitionsWritten := <-writerFinished
+
+	for i := 0; i < numOfSorters; i++ {
+		killSorters <- struct{}{}
+	}
+
+	kWayMerge(partitionsWritten, bufferSize)
 
 	if *verify {
 		fmt.Println("verifying...")
