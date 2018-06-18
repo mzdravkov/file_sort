@@ -3,9 +3,11 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"container/heap"
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"runtime"
 	"sort"
@@ -17,7 +19,6 @@ var writerInput = make(chan []byte)
 var readerFinished = make(chan int)
 var writerFinished = make(chan int)
 var killSorters = make(chan struct{})
-var newLine = []byte("\n")[0]
 
 func createSorters(n int) {
 	for i := 0; i < n; i++ {
@@ -37,6 +38,7 @@ func createSorter() chan []byte {
 				sorterPool <- ch
 				fmt.Println("sorter returning to pool")
 			case <-killSorters:
+				fmt.Println("Another one bites the dust...")
 				return
 			}
 		}
@@ -78,7 +80,7 @@ func bucketSort(buff []byte) {
 	reader := bufio.NewReader(bytes.NewBuffer(buff))
 
 	for {
-		line, err := reader.ReadBytes(newLine)
+		line, err := reader.ReadBytes('\n')
 		// TODO: is it sure that I should break here or should I loop once more?
 		if err != nil {
 			if err == io.EOF {
@@ -151,7 +153,7 @@ func partitioningReader(filename string, bufferSize int) {
 
 		cutAt := len(buff) - 1
 		for ; cutAt >= 0; cutAt-- {
-			if buff[cutAt] == newLine {
+			if buff[cutAt] == '\n' {
 				break
 			}
 		}
@@ -188,7 +190,7 @@ func writer(sortedBuffs <-chan []byte, bufferSize int) {
 		case buff := <-sortedBuffs:
 			fmt.Printf("Writting a sorted buff with size %d to file.\n", len(buff))
 
-			file, err := os.Create("partition_" + strconv.Itoa(partitionsWritten) + ".txt")
+			file, err := os.Create("partition_" + strconv.Itoa(partitionsWritten))
 			if err != nil {
 				panic(err)
 			}
@@ -211,29 +213,62 @@ func writer(sortedBuffs <-chan []byte, bufferSize int) {
 	}
 }
 
+type FileLine struct {
+	index int
+	line  []byte
+}
+
+type FileLineHeap []FileLine
+
+func (h FileLineHeap) Len() int           { return len(h) }
+func (h FileLineHeap) Less(i, j int) bool { return bytes.Compare(h[i].line, h[j].line) == -1 }
+func (h FileLineHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+
+func (h *FileLineHeap) Push(x interface{}) {
+	// Push and Pop use pointer receivers because they modify the slice's length,
+	// not just its contents.
+	*h = append(*h, x.(FileLine))
+}
+
+func (h *FileLineHeap) Pop() interface{} {
+	old := *h
+	n := len(old)
+	x := old[n-1]
+	*h = old[0 : n-1]
+	return x
+}
+
 // TODO: think about maybe doing one initial to merge groups of N files which may increase the overall performance
 // TODO: use buffering when reading the partition files
-func kWayMerge(partitionFilesCount int, bufferSize int) {
+func kWayMerge(inputFilePrefix, outputFileName string, firstPartitionIndex, partitionFilesCount, bufferSize int, assignedMemory int) {
 	fmt.Println("Starting a k-way merge")
-	file, err := os.Create("output.txt")
+	file, err := os.Create(outputFileName)
 	if err != nil {
 		panic(err)
 	}
 	defer file.Close()
 	writer := bufio.NewWriter(file)
 
+	writeBufferSize := 1024 * 1024 * assignedMemory / partitionFilesCount
+
 	// will write output to an in-memory buffer before writting it to disk
-	// otherwise we will have constantly one-line writes
-	writeBuffer := make([]byte, bufferSize)
+	// otherwise we will constantly have one-line writes
+	writeBuffer := make([]byte, writeBufferSize)
 	writtenToBuffer := 0
 
-	inputReaders := make([]*bufio.Reader, partitionFilesCount)
+	inputBufferSize := 1024 * 1024 * assignedMemory / (2 * partitionFilesCount)
+
+	// similarly, we keep a slice with buffers for the input partition files
+	inputBuffers := make([]*bytes.Buffer, partitionFilesCount)
+
+	inputFileReaders := make([]*bufio.Reader, partitionFilesCount)
+	inputLineReaders := make([]*bufio.Reader, partitionFilesCount)
 
 	partitionFiles := make([]string, partitionFilesCount)
 
 	// open all partition files and create readers
 	for i := 0; i < partitionFilesCount; i++ {
-		filename := "partition_" + strconv.Itoa(i) + ".txt"
+		filename := inputFilePrefix + strconv.Itoa(firstPartitionIndex+i)
 		partitionFiles[i] = filename
 		file, err := os.Open(filename)
 		if err != nil {
@@ -241,76 +276,69 @@ func kWayMerge(partitionFilesCount int, bufferSize int) {
 		}
 		defer file.Close()
 
-		inputReaders[i] = bufio.NewReader(file)
+		inputBuffers[i] = bytes.NewBuffer(make([]byte, 0, inputBufferSize))
+		inputBuffers[i].Reset()
+		inputFileReaders[i] = bufio.NewReader(file)
 	}
 
-	currentLines := make([][]byte, len(inputReaders))
+	currentLines := &FileLineHeap{}
 
-	deletePartition := func(i int) {
-		inputReaders = append(inputReaders[:i], inputReaders[i+1:]...)
-		currentLines = append(currentLines[:i], currentLines[i+1:]...)
-		fmt.Println("deleting " + partitionFiles[i])
-		os.Remove(partitionFiles[i])
-		partitionFiles = append(partitionFiles[:i], partitionFiles[i+1:]...)
-	}
-
-	// initial step: read the first line for each of the inputReaders
-	partitionsForDeletion := make([]int, 0)
-	for i, reader := range inputReaders {
-		if line, err := reader.ReadBytes(newLine); err == nil {
-			currentLines[i] = line
-		} else {
-			if err == io.EOF {
-				// if there are no lines in a file, we remove the partition file and the corresponding reader
-				partitionsForDeletion = append(partitionsForDeletion, i)
-			} else {
+	// returns the line read (if available) and a boolean whether a line was read or not
+	readLine := func(inputIndex int) ([]byte, bool) {
+		line, err := inputBuffers[inputIndex].ReadBytes('\n')
+		if err == nil {
+			return line, true
+		} else if err == io.EOF {
+			inputBuffers[inputIndex].Write(line)
+			_, err := io.CopyN(inputBuffers[inputIndex], inputFileReaders[inputIndex], int64(inputBufferSize-512-len(line)))
+			if err != nil && err != io.EOF {
 				panic(err)
 			}
+
+			if inputBuffers[inputIndex].Len() == 0 {
+				return []byte{}, false
+			}
+
+			line, err := inputBuffers[inputIndex].ReadBytes('\n')
+			if err != nil {
+				panic(err)
+			}
+
+			return line, true
+		} else {
+			panic(err)
 		}
 	}
-	for i := 0; i < len(partitionsForDeletion); i++ {
-		deletePartition(partitionsForDeletion[i])
-		// if we delete a partition, all indices greater than the deleted one must be decremented
-		for j := i + 1; j < len(partitionsForDeletion); j++ {
-			if partitionsForDeletion[j] > partitionsForDeletion[i] {
-				partitionsForDeletion[j] -= 1
-			}
+
+	// initial step: read the first line for each of the inputLineReaders
+	// partitionsForDeletion := make([]int, 0)
+	for i := range inputLineReaders {
+		if line, hasLine := readLine(i); hasLine {
+			heap.Push(currentLines, FileLine{line: line, index: i})
 		}
 	}
 
 	// general case step: get the min line from all currentLines and then move forward only that reader
-	for len(currentLines) > 0 {
-		// get the minimum line
-		minLine := 0
-		for i := 1; i < len(currentLines); i++ {
-			if bytes.Compare(currentLines[minLine], currentLines[i]) == 1 {
-				minLine = i
-			}
-		}
+	for currentLines.Len() > 0 {
+		minLine := heap.Pop(currentLines).(FileLine)
 
 		// if there's not enough space in the in-memory buffer, we write the buffer to disk
 		// and then append the line at the start of the buffer
-		if len(currentLines[minLine])+writtenToBuffer > bufferSize {
+		if len(minLine.line)+writtenToBuffer > writeBufferSize {
 			_, err = writer.Write(writeBuffer[:writtenToBuffer])
 			if err != nil {
 				panic(err)
 			}
-			writer.Flush()
 
 			writtenToBuffer = 0
 		}
-		writtenToBuffer += copy(writeBuffer[writtenToBuffer:], currentLines[minLine])
+		writtenToBuffer += copy(writeBuffer[writtenToBuffer:], minLine.line)
 
 		// move forward the reader for the file that we just took a line from
-		if nextLine, err := inputReaders[minLine].ReadBytes(newLine); err == nil {
-			currentLines[minLine] = nextLine
+		if nextLine, hasLine := readLine(minLine.index); hasLine {
+			heap.Push(currentLines, FileLine{line: nextLine, index: minLine.index})
 		} else {
-			if err == io.EOF {
-				// if all lines from this file have bean read, we delete it
-				deletePartition(minLine)
-			} else {
-				panic(err)
-			}
+			os.Remove(inputFilePrefix + strconv.Itoa(minLine.index))
 		}
 	}
 	_, err = writer.Write(writeBuffer[:writtenToBuffer])
@@ -318,7 +346,6 @@ func kWayMerge(partitionFilesCount int, bufferSize int) {
 		panic(err)
 	}
 	writer.Flush()
-
 }
 
 func printHelp() {
@@ -351,7 +378,6 @@ func main() {
 
 	// don't change the setting, just query the current value
 	maxProcs := runtime.GOMAXPROCS(-1)
-	// numOfSorters := maxProcs * inputSize / *assignedMemory
 	fmt.Println(*assignedMemory)
 	numOfSorters := maxProcs
 	fmt.Println("sorters: ", numOfSorters)
@@ -371,7 +397,23 @@ func main() {
 		killSorters <- struct{}{}
 	}
 
-	kWayMerge(partitionsWritten, bufferSize)
+	// if there are too many files, do a two stage k-way merge
+	if partitionsWritten > 128 {
+		base := int(math.Floor(math.Log2(float64(partitionsWritten))))
+		for partitionsWritten%base != 0 {
+			base += 1
+		}
+
+		bigPartitions := 0
+		for i := 0; i < partitionsWritten; i += base {
+			kWayMerge("partition_", "big_partition_"+strconv.Itoa(bigPartitions), i, base, bufferSize, *assignedMemory)
+			bigPartitions += 1
+		}
+
+		kWayMerge("big_partition_", "output", 0, partitionsWritten/base, bufferSize, *assignedMemory)
+	} else {
+		kWayMerge("partition_", "output", 0, partitionsWritten, bufferSize, *assignedMemory)
+	}
 
 	if *verify {
 		fmt.Println("verifying...")
