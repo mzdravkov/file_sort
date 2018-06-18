@@ -56,10 +56,7 @@ func partitioningReader(filename string, assignedMemory, numOfSorters int) {
 		}
 
 		cutAt := len(buff) - 1
-		for ; cutAt >= 0; cutAt-- {
-			if buff[cutAt] == '\n' {
-				break
-			}
+		for ; cutAt >= 0 && buff[cutAt] != '\n'; cutAt-- {
 		}
 
 		if cutAt == len(buff)-1 {
