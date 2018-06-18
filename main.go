@@ -241,7 +241,7 @@ func (h *FileLineHeap) Pop() interface{} {
 // TODO: think about maybe doing one initial to merge groups of N files which may increase the overall performance
 // TODO: use buffering when reading the partition files
 func kWayMerge(inputFilePrefix, outputFileName string, firstPartitionIndex, partitionFilesCount, bufferSize int, assignedMemory int) {
-	fmt.Println("Starting a k-way merge")
+	fmt.Println("Starting a k-way merge for ", inputFilePrefix, firstPartitionIndex, "-", inputFilePrefix, firstPartitionIndex+partitionFilesCount-1)
 	file, err := os.Create(outputFileName)
 	if err != nil {
 		panic(err)
@@ -290,7 +290,7 @@ func kWayMerge(inputFilePrefix, outputFileName string, firstPartitionIndex, part
 			return line, true
 		} else if err == io.EOF {
 			inputBuffers[inputIndex].Write(line)
-			_, err := io.CopyN(inputBuffers[inputIndex], inputFileReaders[inputIndex], int64(inputBufferSize-512-len(line)))
+			_, err := io.CopyN(inputBuffers[inputIndex], inputFileReaders[inputIndex], int64(inputBufferSize-4096-len(line)))
 			if err != nil && err != io.EOF {
 				panic(err)
 			}
@@ -338,7 +338,8 @@ func kWayMerge(inputFilePrefix, outputFileName string, firstPartitionIndex, part
 		if nextLine, hasLine := readLine(minLine.index); hasLine {
 			heap.Push(currentLines, FileLine{line: nextLine, index: minLine.index})
 		} else {
-			os.Remove(inputFilePrefix + strconv.Itoa(minLine.index))
+			fmt.Println("Deleting", partitionFiles[minLine.index])
+			os.Remove(partitionFiles[minLine.index])
 		}
 	}
 	_, err = writer.Write(writeBuffer[:writtenToBuffer])
@@ -358,6 +359,7 @@ func printHelp() {
 func main() {
 	assignedMemory := flag.Int("memory", 1024, "The amount of memory assigned for the sorting program (in MB).\n\t\tNote: It is not strict and it may use slightly more than this.")
 	verify := flag.Bool("verify", false, "Perform a verification step to check that the output file is sorted (shouldn't be neccessary)")
+	twoStepMerge := flag.Int("two-step", 256, "Will perform two-step merge when files are more than the specified number.\nt\t\tFirst step merges log2(partitionFilesCount) and then merges the resulting files.")
 	flag.Parse()
 
 	args := flag.Args()
@@ -367,14 +369,6 @@ func main() {
 	}
 
 	inputFile := flag.Arg(0)
-
-	// inputFileInfo, err := os.Stat(inputFile)
-	// if err != nil {
-	// 	panic(err)
-	// }
-
-	// get the size in MB
-	// inputSize := int(inputFileInfo.Size() / (1024 * 1024))
 
 	// don't change the setting, just query the current value
 	maxProcs := runtime.GOMAXPROCS(-1)
@@ -398,19 +392,26 @@ func main() {
 	}
 
 	// if there are too many files, do a two stage k-way merge
-	if partitionsWritten > 128 {
+	if partitionsWritten > *twoStepMerge {
+		// get how much partition files will be merged to one bigger partition file on the first step
 		base := int(math.Floor(math.Log2(float64(partitionsWritten))))
-		for partitionsWritten%base != 0 {
-			base += 1
-		}
+		// NOTE: the parenthesis are important
+		lPartitionsCount := base * (partitionsWritten / base)
+		rPartitionsCount := partitionsWritten - lPartitionsCount
+		fmt.Println("Two stage merge with base", base)
 
+		fmt.Println("Merge", lPartitionsCount, "partitions in groups by", base)
 		bigPartitions := 0
-		for i := 0; i < partitionsWritten; i += base {
+		for i := 0; i < lPartitionsCount; i += base {
 			kWayMerge("partition_", "big_partition_"+strconv.Itoa(bigPartitions), i, base, bufferSize, *assignedMemory)
 			bigPartitions += 1
 		}
+		fmt.Println("Merge the remaining", rPartitionsCount, "into another big partition")
+		// TODO if one file remains, just rename it
+		kWayMerge("partition_", "big_partition_"+strconv.Itoa(bigPartitions), lPartitionsCount, rPartitionsCount, bufferSize, *assignedMemory)
+		bigPartitions += 1
 
-		kWayMerge("big_partition_", "output", 0, partitionsWritten/base, bufferSize, *assignedMemory)
+		kWayMerge("big_partition_", "output", 0, bigPartitions, bufferSize, *assignedMemory)
 	} else {
 		kWayMerge("partition_", "output", 0, partitionsWritten, bufferSize, *assignedMemory)
 	}
