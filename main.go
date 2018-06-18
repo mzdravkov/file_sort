@@ -9,6 +9,16 @@ import (
 	"strconv"
 )
 
+var MB = 1024 * 1024
+
+var showMessages bool = false
+
+func log(messages ...interface{}) {
+	if showMessages {
+		fmt.Println(messages...)
+	}
+}
+
 func printHelp() {
 	fmt.Println("USAGE: file_sort [OPTIONS]... FILE\nSorts big files lexicographically.\n\nOptions:")
 	flag.VisitAll(func(f *flag.Flag) {
@@ -18,13 +28,16 @@ func printHelp() {
 
 func main() {
 	assignedMemory := flag.Int("memory", 1024, "The amount of memory assigned for the sorting program (in MB).\n\t\t\tNote: It is not strict and it may use slightly more than this.")
-	verify := flag.Bool("verify", false, "Perform a verification step to check that the output file is sorted (shouldn't be neccessary)")
+	verify := flag.Bool("verify", false, "Checks if the input file is sorted.")
 	twoStepMerge := flag.Int("two-step", 256, "Will perform two-step merge when files are more than the specified number.\n\t\t\tFirst step merges log2(partitionFilesCount) and then merges the resulting files.")
 	outputFileName := flag.String("output", "output", "The name of the output sorted file.")
 	// -1 so that we don't change the setting, just query the current value
-	n := flag.Int("n", runtime.GOMAXPROCS(-1), "Number of parallel sorters. Defaults to GOMAXPROCS")
-	help := flag.Bool("help", false, "Prints this message")
+	n := flag.Int("n", runtime.GOMAXPROCS(-1), "Number of parallel sorters. Defaults to GOMAXPROCS.")
+	help := flag.Bool("help", false, "Prints this message.")
+	verbose := flag.Bool("verbose", false, "Shows status messages.")
 	flag.Parse()
+
+	showMessages = *verbose
 
 	args := flag.Args()
 	if len(args) == 0 || *help {
@@ -34,18 +47,17 @@ func main() {
 
 	inputFile := flag.Arg(0)
 
-	if *verify {
-		fmt.Println("verifying...")
-		return
-	}
-
-	fmt.Println(*assignedMemory)
-
 	// the GC should allocate (about?) twice the actually used memory
 	*assignedMemory = *assignedMemory / 2
 
+	if *verify {
+		if sorted := verifyFileIsSorted(inputFile, *assignedMemory); !sorted {
+			os.Stderr.WriteString("Not sorted\n")
+		}
+		return
+	}
+
 	numOfSorters := *n
-	fmt.Println("sorters: ", numOfSorters)
 	sorterPool = make(chan chan []byte, int(numOfSorters))
 	createSorters(int(numOfSorters))
 
@@ -66,16 +78,16 @@ func main() {
 		// NOTE: the parenthesis are important
 		lPartitionsCount := base * (partitionsWritten / base)
 		rPartitionsCount := partitionsWritten - lPartitionsCount
-		fmt.Println("Two-step merge")
+		log("Two-step merge")
 
-		fmt.Println("Merge", lPartitionsCount, "partitions in groups by", base)
+		log("Merge", lPartitionsCount, "partitions in groups by", base)
 		bigPartitions := 0
 		for i := 0; i < lPartitionsCount; i += base {
 			kWayMerge("partition_", "big_partition_"+strconv.Itoa(bigPartitions), i, base, *assignedMemory)
 			bigPartitions += 1
 		}
 
-		fmt.Println("Merge the remaining", rPartitionsCount, "into another big partition")
+		log("Merge the remaining", rPartitionsCount, "into another big partition")
 
 		// if one file remains, just rename it
 		if rPartitionsCount == 1 {
@@ -94,5 +106,5 @@ func main() {
 		kWayMerge("partition_", *outputFileName, 0, partitionsWritten, *assignedMemory)
 	}
 
-	fmt.Println("Done")
+	log("Done")
 }

@@ -3,7 +3,6 @@ package main
 import (
 	"bufio"
 	"bytes"
-	"fmt"
 	"io"
 	"sort"
 )
@@ -21,7 +20,7 @@ func createSorters(n int) {
 // at which buffers with lines for sorting should be sent to it.
 func createSorter() chan []byte {
 	ch := make(chan []byte)
-	fmt.Println("creating a sorter")
+	log("Creating a sorter")
 	go func() {
 		for {
 			select {
@@ -29,9 +28,9 @@ func createSorter() chan []byte {
 				sortBuffer(buff)
 				writerInput <- buff
 				sorterPool <- ch
-				fmt.Println("sorter returning to pool")
+				log("Sorter returning to pool")
 			case <-killSorters:
-				fmt.Println("Another one bites the dust...")
+				log("Another one bites the dust...")
 				return
 			}
 		}
@@ -109,6 +108,6 @@ func bucketSort(buff []byte) {
 }
 
 func sortBuffer(buff []byte) {
-	fmt.Printf("Starting to sort %d bytes of data.\n", len(buff))
+	log("Starting to sort", len(buff), "bytes of data.")
 	bucketSort(buff)
 }

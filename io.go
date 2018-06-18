@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"container/heap"
-	"fmt"
 	"io"
 	"os"
 	"strconv"
@@ -26,7 +25,7 @@ func partitioningReader(filename string, assignedMemory, numOfSorters int) {
 
 	// NOTE: divided by two, because a sorter will allocate
 	// bufferSize number of bytes more for the list of buckets
-	bufferSize := 1024 * 1024 * (assignedMemory / numOfSorters) / 2
+	bufferSize := MB * (assignedMemory / numOfSorters) / 2
 
 	remainder := []byte{}
 
@@ -73,7 +72,7 @@ func partitioningReader(filename string, assignedMemory, numOfSorters int) {
 		// the buffer is ready, so we wait for an available sorter
 		for {
 			sorter := <-sorterPool
-			fmt.Println("sorter taken from pool")
+			log("sorter taken from pool")
 			sorter <- buff
 			partitionsRead += 1
 			break
@@ -95,7 +94,7 @@ func writer(sortedBuffs <-chan []byte) {
 		case buff := <-sortedBuffs:
 			filename := "partition_" + strconv.Itoa(partitionsWritten)
 
-			fmt.Println("Writting a sorted buff with size ", len(buff), "to file ", filename)
+			log("Writting a sorted buff with size ", len(buff), "to file ", filename)
 
 			file, err := os.Create(filename)
 			if err != nil {
@@ -148,7 +147,7 @@ func (h *FileLineHeap) Pop() interface{} {
 }
 
 func kWayMerge(inputFilePrefix, outputFileName string, firstPartitionIndex, partitionFilesCount int, assignedMemory int) {
-	fmt.Println("Starting a k-way merge for ", inputFilePrefix, firstPartitionIndex, "-", inputFilePrefix, firstPartitionIndex+partitionFilesCount-1)
+	log("Starting a k-way merge for ", inputFilePrefix, firstPartitionIndex, "-", inputFilePrefix, firstPartitionIndex+partitionFilesCount-1)
 	file, err := os.Create(outputFileName)
 	if err != nil {
 		panic(err)
@@ -156,14 +155,14 @@ func kWayMerge(inputFilePrefix, outputFileName string, firstPartitionIndex, part
 	defer file.Close()
 	writer := bufio.NewWriter(file)
 
-	writeBufferSize := 1024 * 1024 * assignedMemory / 2
+	writeBufferSize := MB * assignedMemory / 2
 
 	// will write output to an in-memory buffer before writting it to disk
 	// otherwise we will constantly have one-line writes
 	writeBuffer := make([]byte, writeBufferSize)
 	writtenToBuffer := 0
 
-	inputBufferSize := 1024 * 1024 * assignedMemory / (2 * partitionFilesCount)
+	inputBufferSize := MB * assignedMemory / (2 * partitionFilesCount)
 
 	// similarly, we keep a slice with buffers for the input partition files
 	inputBuffers := make([]*bytes.Buffer, partitionFilesCount)
@@ -244,7 +243,7 @@ func kWayMerge(inputFilePrefix, outputFileName string, firstPartitionIndex, part
 		if nextLine, hasLine := readLine(minLine.index); hasLine {
 			heap.Push(currentLines, FileLine{line: nextLine, index: minLine.index})
 		} else {
-			fmt.Println("Deleting", partitionFiles[minLine.index])
+			log("Deleting", partitionFiles[minLine.index])
 			os.Remove(partitionFiles[minLine.index])
 		}
 	}
