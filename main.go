@@ -249,7 +249,7 @@ func kWayMerge(inputFilePrefix, outputFileName string, firstPartitionIndex, part
 	defer file.Close()
 	writer := bufio.NewWriter(file)
 
-	writeBufferSize := 1024 * 1024 * assignedMemory / partitionFilesCount
+	writeBufferSize := 1024 * 1024 * assignedMemory / 2
 
 	// will write output to an in-memory buffer before writting it to disk
 	// otherwise we will constantly have one-line writes
@@ -359,7 +359,10 @@ func printHelp() {
 func main() {
 	assignedMemory := flag.Int("memory", 1024, "The amount of memory assigned for the sorting program (in MB).\n\t\tNote: It is not strict and it may use slightly more than this.")
 	verify := flag.Bool("verify", false, "Perform a verification step to check that the output file is sorted (shouldn't be neccessary)")
-	twoStepMerge := flag.Int("two-step", 256, "Will perform two-step merge when files are more than the specified number.\nt\t\tFirst step merges log2(partitionFilesCount) and then merges the resulting files.")
+	twoStepMerge := flag.Int("two-step", 256, "Will perform two-step merge when files are more than the specified number.\n\t\tFirst step merges log2(partitionFilesCount) and then merges the resulting files.")
+	outputFileName := flag.String("output", "output", "The name of the output sorted file.")
+	// -1 so that we don't change the setting, just query the current value
+	n := flag.Int("n", runtime.GOMAXPROCS(-1), "Number of parallel sorters. Defaults to GOMAXPROCS")
 	flag.Parse()
 
 	args := flag.Args()
@@ -371,9 +374,13 @@ func main() {
 	inputFile := flag.Arg(0)
 
 	// don't change the setting, just query the current value
-	maxProcs := runtime.GOMAXPROCS(-1)
+	// maxProcs := runtime.GOMAXPROCS(-1)
 	fmt.Println(*assignedMemory)
-	numOfSorters := maxProcs
+
+	// the GC should allocate (about?) twice the actually used memory
+	*assignedMemory = *assignedMemory / 2
+
+	numOfSorters := *n
 	fmt.Println("sorters: ", numOfSorters)
 	sorterPool = make(chan chan []byte, int(numOfSorters))
 	createSorters(int(numOfSorters))
@@ -406,14 +413,23 @@ func main() {
 			kWayMerge("partition_", "big_partition_"+strconv.Itoa(bigPartitions), i, base, bufferSize, *assignedMemory)
 			bigPartitions += 1
 		}
-		fmt.Println("Merge the remaining", rPartitionsCount, "into another big partition")
-		// TODO if one file remains, just rename it
-		kWayMerge("partition_", "big_partition_"+strconv.Itoa(bigPartitions), lPartitionsCount, rPartitionsCount, bufferSize, *assignedMemory)
-		bigPartitions += 1
 
-		kWayMerge("big_partition_", "output", 0, bigPartitions, bufferSize, *assignedMemory)
+		fmt.Println("Merge the remaining", rPartitionsCount, "into another big partition")
+
+		// if one file remains, just rename it
+		if rPartitionsCount == 1 {
+			if err := os.Rename("partition_"+strconv.Itoa(lPartitionsCount), "big_partition_"+strconv.Itoa(bigPartitions)); err != nil {
+				panic(err)
+			}
+			bigPartitions += 1
+		} else if rPartitionsCount > 1 {
+			kWayMerge("partition_", "big_partition_"+strconv.Itoa(bigPartitions), lPartitionsCount, rPartitionsCount, bufferSize, *assignedMemory)
+			bigPartitions += 1
+		}
+
+		kWayMerge("big_partition_", *outputFileName, 0, bigPartitions, bufferSize, *assignedMemory)
 	} else {
-		kWayMerge("partition_", "output", 0, partitionsWritten, bufferSize, *assignedMemory)
+		kWayMerge("partition_", *outputFileName, 0, partitionsWritten, bufferSize, *assignedMemory)
 	}
 
 	if *verify {
