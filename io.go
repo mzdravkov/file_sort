@@ -25,7 +25,7 @@ func partitioningReader(filename string, assignedMemory, numOfSorters int) {
 
 	// NOTE: divided by two, because a sorter will allocate
 	// bufferSize number of bytes more for the list of buckets
-	bufferSize := MB * (assignedMemory / numOfSorters) / 2
+	bufferSize := (assignedMemory / numOfSorters) / 2
 
 	remainder := []byte{}
 
@@ -152,14 +152,14 @@ func kWayMerge(inputFilePrefix, outputFileName string, firstPartitionIndex, part
 	defer file.Close()
 	writer := bufio.NewWriter(file)
 
-	writeBufferSize := MB * assignedMemory / 2
+	writeBufferSize := assignedMemory / 2
 
 	// will write output to an in-memory buffer before writting it to disk
 	// otherwise we will constantly have one-line writes
 	writeBuffer := make([]byte, writeBufferSize)
 	writtenToBuffer := 0
 
-	inputBufferSize := MB * assignedMemory / (2 * partitionFilesCount)
+	inputBufferSize := assignedMemory / (2 * partitionFilesCount)
 
 	// similarly, we keep a slice with buffers for the input partition files
 	inputBuffers := make([]*bytes.Buffer, partitionFilesCount)

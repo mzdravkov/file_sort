@@ -25,7 +25,7 @@ func verifyFileIsSorted(filename string, assignedMemory int) bool {
 			return line, true
 		} else if err == io.EOF {
 			inputBuffer.Write(line)
-			_, err := io.CopyN(inputBuffer, fileReader, int64(MB*assignedMemory-4096-len(line)))
+			_, err := io.CopyN(inputBuffer, fileReader, int64(assignedMemory-4096-len(line)))
 			if err != nil && err != io.EOF {
 				panic(err)
 			}

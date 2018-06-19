@@ -29,15 +29,24 @@ func printHelp() {
 func main() {
 	assignedMemory := flag.Int("memory", 1024, "The amount of memory assigned for the sorting program (in MB).\n\t\t\tNote: It is not strict and it may use slightly more than this.")
 	verify := flag.Bool("verify", false, "Checks if the input file is sorted.")
-	twoStepMerge := flag.Int("two-step", 256, "Will perform two-step merge when files are more than the specified number.\n\t\t\tFirst step merges log2(partitionFilesCount) and then merges the resulting files.")
+	twoStepMerge := flag.Int("two-step", 512, "Will perform two-step merge when files are more than the specified number.\n\t\t\tFirst step merges log2(partitionFilesCount) and the second merges the resulting files.")
 	outputFileName := flag.String("output", "output", "The name of the output sorted file.")
 	// -1 so that we don't change the setting, just query the current value
 	n := flag.Int("n", runtime.GOMAXPROCS(-1), "Number of parallel sorters. Defaults to GOMAXPROCS.")
 	help := flag.Bool("help", false, "Prints this message.")
 	verbose := flag.Bool("verbose", false, "Shows status messages.")
+	genFileSize := flag.Int("gen-file", 0, "Generates a test file with the given size filled with random lines.\n\t\t\tThe -memory flag determines the size of the buffer used.\n\t\t\tNote that if you don't pass -output neither here nor when sorting the file, you will overwrite it.\n\t\t\tDo not pass the FILE argument whit this option.")
 	flag.Parse()
 
 	showMessages = *verbose
+
+	// the GC should allocate (about?) twice the actually used memory
+	*assignedMemory = MB * (*assignedMemory) / 2
+
+	if *genFileSize > 0 {
+		genTestFile(*genFileSize*MB, *assignedMemory, *outputFileName)
+		return
+	}
 
 	args := flag.Args()
 	if len(args) == 0 || *help {
@@ -46,9 +55,6 @@ func main() {
 	}
 
 	inputFile := flag.Arg(0)
-
-	// the GC should allocate (about?) twice the actually used memory
-	*assignedMemory = *assignedMemory / 2
 
 	if *verify {
 		if sorted := verifyFileIsSorted(inputFile, *assignedMemory); !sorted {
